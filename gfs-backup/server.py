@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Kleiner HTTP-Server für GFS Backup Addon – Status & Befehle."""
+"""HTTP-Server für GFS Backup Addon."""
 
 import json
 import os
-import subprocess
-import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -13,7 +11,6 @@ PORT = 8099
 
 
 def read_status() -> dict:
-    """Status-Datei lesen."""
     try:
         with open(STATUS_FILE, "r") as f:
             return json.load(f)
@@ -21,29 +18,10 @@ def read_status() -> dict:
         return {"error": "Noch kein Status verfügbar"}
 
 
-def write_status(data: dict):
-    """Status-Datei schreiben."""
-    try:
-        with open(STATUS_FILE, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        print(f"[Server] Status schreiben fehlgeschlagen: {e}")
-
-
-def send_to_addon(command: str):
-    """Befehl an run.sh weitergeben via Flag-Datei."""
-    try:
-        flag_file = f"/tmp/gfs_cmd_{command}_{datetime.now().strftime('%H%M%S')}"
-        with open(flag_file, "w") as f:
-            f.write(command)
-    except Exception as e:
-        print(f"[Server] Befehl schreiben fehlgeschlagen: {e}")
-
-
 class GFSHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
-        pass  # Kein Log-Spam
+        pass
 
     def do_GET(self):
         if self.path == "/status":
@@ -66,8 +44,12 @@ class GFSHandler(BaseHTTPRequestHandler):
                 data = json.loads(body)
                 cmd = data.get("command", "")
                 if cmd:
-                    send_to_addon(cmd)
-                    print(f"[Server] Befehl empfangen: {cmd}")
+                    # Befehl via Flag-Datei an run.sh weitergeben
+                    ts = datetime.now().strftime('%H%M%S%f')
+                    flag = f"/tmp/gfs_cmd_{ts}"
+                    with open(flag, "w") as f:
+                        f.write(cmd)
+                    print(f"[Server] Befehl: {cmd}")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
@@ -85,11 +67,7 @@ class GFSHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def run():
+if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", PORT), GFSHandler)
     print(f"[Server] GFS HTTP-Server läuft auf Port {PORT}")
     server.serve_forever()
-
-
-if __name__ == "__main__":
-    run()

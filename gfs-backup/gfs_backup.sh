@@ -65,14 +65,12 @@ fi
 BACKUP_SLUG=$(echo "${BODY}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['slug'])" 2>/dev/null)
 echo "[GFS] Backup Slug: ${BACKUP_SLUG}"
 
-# ── 2. Warten bis Datei auf Disk ist ──────────────────────────────────────
-# Neues HA-Format (2025+): Name_Datum_Slug.tar  z.B. HA-Daily-2026-06-27_2026-06-27_15.30_fa3c7a9e.tar
+# ── 2. Warten bis Datei in /backup/ erscheint ─────────────────────────────
 echo "[GFS] Suche Backup-Datei in /backup/ ..."
 WAIT=0
 BACKUP_FILE=""
 while [ "${WAIT}" -lt 600 ]; do
-    # Datei anhand Slug am Ende des Dateinamens finden
-    FOUND=$(find /backup -maxdepth 1 -name "*${BACKUP_SLUG}.tar" 2>/dev/null | head -1)
+    FOUND=$(find /backup -maxdepth 1 -name "*${BACKUP_SLUG}*" 2>/dev/null | head -1)
     if [ -n "${FOUND}" ]; then
         BACKUP_FILE="${FOUND}"
         break
@@ -100,11 +98,9 @@ else
     SMB_AUTH="-N"
 fi
 
-# Unterordner anlegen (Fehler ignorieren)
 smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
     -c "mkdir ${TARGET_DIR}" 2>/dev/null || true
 
-# Upload mit lesbarem Namen
 smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
     -c "put ${BACKUP_FILE} ${TARGET_DIR}/${BACKUP_NAME}.tar"
 
@@ -115,7 +111,7 @@ fi
 echo "[GFS] Upload OK: ${TARGET_DIR}/${BACKUP_NAME}.tar"
 
 # ── 4. Rotation auf NAS ───────────────────────────────────────────────────
-echo "[GFS] NAS-Rotation: max ${KEEP_REMOTE} behalten in ${TARGET_DIR}/"
+echo "[GFS] NAS-Rotation: max ${KEEP_REMOTE} in ${TARGET_DIR}/"
 
 NAS_FILES=$(smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
     -c "ls ${TARGET_DIR}/HA-*.tar" 2>/dev/null | \

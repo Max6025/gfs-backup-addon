@@ -12,6 +12,7 @@ arch:
 startup: "application"
 boot: "auto"
 init: false
+stdin: true
 hassio_api: true
 hassio_role: "backup"
 map:

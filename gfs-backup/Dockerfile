@@ -3,10 +3,9 @@ FROM ${BUILD_FROM}
 
 ENV LANG C.UTF-8
 
-# samba-client für Netzwerkfreigaben, jq für JSON-Parsing, coreutils für Zeitfunktionen
 RUN apk add --no-cache \
     samba-client \
-    jq \
+    python3 \
     coreutils \
     tzdata \
     curl \

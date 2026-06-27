@@ -13,6 +13,7 @@ RUN apk add --no-cache \
 
 COPY run.sh /
 COPY gfs_backup.sh /
+COPY server.py /
 
 RUN chmod a+x /run.sh /gfs_backup.sh
 

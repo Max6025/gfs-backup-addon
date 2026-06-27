@@ -1,0 +1,94 @@
+name: "GFS Backup"
+version: "1.0.0"
+slug: "gfs_backup"
+description: "Großvater-Vater-Sohn Backup – täglich, wöchentlich, monatlich, jährlich mit automatischer Rotation auf Samba/NAS"
+url: "https://github.com/MaxKoenig/gfs-backup-addon"
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+startup: "application"
+boot: "auto"
+init: false
+hassio_api: true
+hassio_role: "backup"
+map:
+  - backup:rw
+
+options:
+  nas_host: ""
+  nas_share: ""
+  nas_username: ""
+  nas_password: ""
+
+  # Täglich
+  daily_enabled: true
+  daily_time: "03:00"
+  daily_target_dir: "ha_daily"
+  daily_keep_local: 1
+  daily_keep_remote: 7
+
+  # Wöchentlich
+  weekly_enabled: true
+  weekly_time: "04:00"
+  weekly_weekday: "sun"
+  weekly_target_dir: "ha_weekly"
+  weekly_keep_local: 1
+  weekly_keep_remote: 4
+
+  # Monatlich
+  monthly_enabled: true
+  monthly_time: "05:00"
+  monthly_day: 1
+  monthly_target_dir: "ha_monthly"
+  monthly_keep_local: 1
+  monthly_keep_remote: 12
+
+  # Jährlich
+  yearly_enabled: true
+  yearly_time: "06:00"
+  yearly_day: 1
+  yearly_month: 1
+  yearly_target_dir: "ha_yearly"
+  yearly_keep_local: 1
+  yearly_keep_remote: 2
+
+  backup_password: ""
+
+schema:
+  nas_host: "str"
+  nas_share: "str"
+  nas_username: "str?"
+  nas_password: "str?"
+
+  daily_enabled: "bool"
+  daily_time: "str"
+  daily_target_dir: "str"
+  daily_keep_local: "int(0,30)"
+  daily_keep_remote: "int(1,365)"
+
+  weekly_enabled: "bool"
+  weekly_time: "str"
+  weekly_weekday: "list(mon|tue|wed|thu|fri|sat|sun)"
+  weekly_target_dir: "str"
+  weekly_keep_local: "int(0,30)"
+  weekly_keep_remote: "int(1,52)"
+
+  monthly_enabled: "bool"
+  monthly_time: "str"
+  monthly_day: "int(1,28)"
+  monthly_target_dir: "str"
+  monthly_keep_local: "int(0,30)"
+  monthly_keep_remote: "int(1,24)"
+
+  yearly_enabled: "bool"
+  yearly_time: "str"
+  yearly_day: "int(1,28)"
+  yearly_month: "int(1,12)"
+  yearly_target_dir: "str"
+  yearly_keep_local: "int(0,10)"
+  yearly_keep_remote: "int(1,10)"
+
+  backup_password: "str?"

@@ -4,7 +4,6 @@ bashio::log.info "GFS Backup Addon startet..."
 
 export SUPERVISOR_TOKEN
 
-# Konfiguration einlesen
 NAS_HOST=$(bashio::config 'nas_host')
 NAS_SHARE=$(bashio::config 'nas_share')
 NAS_USER=$(bashio::config 'nas_username')
@@ -69,83 +68,17 @@ LAST_WEEKLY=""
 LAST_MONTHLY=""
 LAST_YEARLY=""
 
-# ── stdin-Handler für manuelle Aktionen ───────────────────────────────────
-# Läuft im Hintergrund, wartet auf hassio.addon_stdin Befehle
-_handle_stdin() {
-    while IFS= read -r line; do
-        CMD=$(echo "${line}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('command',''))" 2>/dev/null)
-        bashio::log.info "stdin Befehl empfangen: ${CMD}"
-
-        case "${CMD}" in
-            delete_last_local)
-                # Letztes lokales GFS-Backup löschen (neuestes aller 4 Ebenen)
-                bashio::log.info "=== Lösche letztes lokales GFS-Backup ==="
-                LAST_SLUG=$(curl -s \
-                    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
-                    "http://supervisor/backups" | \
-                    python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-prefixes = ('HA-Daily-', 'HA-Weekly-', 'HA-Monthly-', 'HA-Yearly-')
-backups = [b for b in data.get('data', {}).get('backups', []) if b.get('name','').startswith(prefixes)]
-backups.sort(key=lambda x: x.get('date',''), reverse=True)
-if backups:
-    print(backups[0]['slug'])
-" 2>/dev/null)
-                if [ -n "${LAST_SLUG}" ]; then
-                    curl -s -X DELETE \
-                        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
-                        "http://supervisor/backups/${LAST_SLUG}" > /dev/null
-                    bashio::log.info "Gelöscht: ${LAST_SLUG}"
-                else
-                    bashio::log.warning "Kein GFS-Backup gefunden zum Löschen"
-                fi
-                ;;
-
-            delete_last_nas_daily)
-                bashio::log.info "=== Lösche letztes NAS-Backup (täglich) ==="
-                _delete_last_nas "${DAILY_DIR}"
-                ;;
-            delete_last_nas_weekly)
-                bashio::log.info "=== Lösche letztes NAS-Backup (wöchentlich) ==="
-                _delete_last_nas "${WEEKLY_DIR}"
-                ;;
-            delete_last_nas_monthly)
-                bashio::log.info "=== Lösche letztes NAS-Backup (monatlich) ==="
-                _delete_last_nas "${MONTHLY_DIR}"
-                ;;
-            delete_last_nas_yearly)
-                bashio::log.info "=== Lösche letztes NAS-Backup (jährlich) ==="
-                _delete_last_nas "${YEARLY_DIR}"
-                ;;
-
-            trigger_daily)
-                bashio::log.info "=== Manueller Trigger: TÄGLICH ==="
-                /gfs_backup.sh "daily" "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-                    "${DAILY_DIR}" "${DAILY_KEEP_LOCAL}" "${DAILY_KEEP_REMOTE}" "${BACKUP_PASS}"
-                ;;
-            trigger_weekly)
-                bashio::log.info "=== Manueller Trigger: WÖCHENTLICH ==="
-                /gfs_backup.sh "weekly" "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-                    "${WEEKLY_DIR}" "${WEEKLY_KEEP_LOCAL}" "${WEEKLY_KEEP_REMOTE}" "${BACKUP_PASS}"
-                ;;
-            trigger_monthly)
-                bashio::log.info "=== Manueller Trigger: MONATLICH ==="
-                /gfs_backup.sh "monthly" "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-                    "${MONTHLY_DIR}" "${MONTHLY_KEEP_LOCAL}" "${MONTHLY_KEEP_REMOTE}" "${BACKUP_PASS}"
-                ;;
-            trigger_yearly)
-                bashio::log.info "=== Manueller Trigger: JÄHRLICH ==="
-                /gfs_backup.sh "yearly" "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-                    "${YEARLY_DIR}" "${YEARLY_KEEP_LOCAL}" "${YEARLY_KEEP_REMOTE}" "${BACKUP_PASS}"
-                ;;
-            *)
-                bashio::log.warning "Unbekannter Befehl: ${CMD}"
-                ;;
-        esac
-    done
+# ── Backup ausführen – Fehler stoppen NICHT das Addon ─────────────────────
+_run_backup() {
+    local type="$1"
+    bashio::log.info "=== Starte ${type} Backup ==="
+    /gfs_backup.sh "${type}" \
+        "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
+        "$2" "$3" "$4" "${BACKUP_PASS}" || \
+        bashio::log.error "${type} Backup fehlgeschlagen – Addon läuft weiter"
 }
 
+# ── NAS löschen Hilfsfunktion ──────────────────────────────────────────────
 _delete_last_nas() {
     local DIR="$1"
     if [ -n "${NAS_USER}" ] && [ -n "${NAS_PASS}" ]; then
@@ -165,11 +98,62 @@ _delete_last_nas() {
     fi
 }
 
-# stdin-Handler im Hintergrund starten
+# ── stdin-Handler ──────────────────────────────────────────────────────────
+_handle_stdin() {
+    while IFS= read -r line; do
+        [ -z "${line}" ] && continue
+        CMD=$(echo "${line}" | python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+    print(d.get('command',''))
+except:
+    print('')
+" 2>/dev/null)
+        bashio::log.info "stdin: ${CMD}"
+
+        case "${CMD}" in
+            trigger_daily)
+                _run_backup "daily" "${DAILY_DIR}" "${DAILY_KEEP_LOCAL}" "${DAILY_KEEP_REMOTE}" ;;
+            trigger_weekly)
+                _run_backup "weekly" "${WEEKLY_DIR}" "${WEEKLY_KEEP_LOCAL}" "${WEEKLY_KEEP_REMOTE}" ;;
+            trigger_monthly)
+                _run_backup "monthly" "${MONTHLY_DIR}" "${MONTHLY_KEEP_LOCAL}" "${MONTHLY_KEEP_REMOTE}" ;;
+            trigger_yearly)
+                _run_backup "yearly" "${YEARLY_DIR}" "${YEARLY_KEEP_LOCAL}" "${YEARLY_KEEP_REMOTE}" ;;
+            delete_last_local)
+                bashio::log.info "=== Lösche letztes lokales GFS-Backup ==="
+                LAST_SLUG=$(curl -s \
+                    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+                    "http://supervisor/backups" | \
+                    python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+prefixes = ('HA-Daily-', 'HA-Weekly-', 'HA-Monthly-', 'HA-Yearly-')
+backups = [b for b in data.get('data', {}).get('backups', []) if b.get('name','').startswith(prefixes)]
+backups.sort(key=lambda x: x.get('date',''), reverse=True)
+if backups: print(backups[0]['slug'])
+" 2>/dev/null)
+                if [ -n "${LAST_SLUG}" ]; then
+                    curl -s -X DELETE \
+                        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+                        "http://supervisor/backups/${LAST_SLUG}" > /dev/null
+                    bashio::log.info "Lokal gelöscht: ${LAST_SLUG}"
+                else
+                    bashio::log.warning "Kein GFS-Backup zum Löschen gefunden"
+                fi ;;
+            delete_last_nas_daily)   _delete_last_nas "${DAILY_DIR}"   ;;
+            delete_last_nas_weekly)  _delete_last_nas "${WEEKLY_DIR}"  ;;
+            delete_last_nas_monthly) _delete_last_nas "${MONTHLY_DIR}" ;;
+            delete_last_nas_yearly)  _delete_last_nas "${YEARLY_DIR}"  ;;
+            *) bashio::log.warning "Unbekannter Befehl: ${CMD}" ;;
+        esac
+    done
+}
+
 _handle_stdin &
 
 bashio::log.info "GFS Backup läuft. Prüfe jede Minute..."
-bashio::log.info "Manuelle Aktionen via hassio.addon_stdin: trigger_daily, trigger_weekly, trigger_monthly, trigger_yearly, delete_last_local, delete_last_nas_daily"
 
 while true; do
     NOW_TIME=$(date +"%H:%M")
@@ -178,52 +162,36 @@ while true; do
     NOW_MONTH=$(date +%-m)
     NOW_KEY=$(date +"%Y-%m-%d-%H-%M")
 
-    # ── JÄHRLICH ──────────────────────────────────────────────
-    if [ "${YEARLY_ENABLED}" = "true" ]; then
-        if [ "${NOW_TIME}" = "${YEARLY_TIME}" ] && \
-           [ "${NOW_DAY}" = "${YEARLY_DAY}" ] && \
-           [ "${NOW_MONTH}" = "${YEARLY_MONTH}" ] && \
-           [ "${LAST_YEARLY}" != "${NOW_KEY}" ]; then
-            LAST_YEARLY="${NOW_KEY}"
-            bashio::log.info "=== Starte JÄHRLICHES Backup ==="
-            /gfs_backup.sh "yearly" "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-                "${YEARLY_DIR}" "${YEARLY_KEEP_LOCAL}" "${YEARLY_KEEP_REMOTE}" "${BACKUP_PASS}"
-        fi
+    if [ "${YEARLY_ENABLED}" = "true" ] && \
+       [ "${NOW_TIME}" = "${YEARLY_TIME}" ] && \
+       [ "${NOW_DAY}" = "${YEARLY_DAY}" ] && \
+       [ "${NOW_MONTH}" = "${YEARLY_MONTH}" ] && \
+       [ "${LAST_YEARLY}" != "${NOW_KEY}" ]; then
+        LAST_YEARLY="${NOW_KEY}"
+        _run_backup "yearly" "${YEARLY_DIR}" "${YEARLY_KEEP_LOCAL}" "${YEARLY_KEEP_REMOTE}"
     fi
 
-    # ── MONATLICH ─────────────────────────────────────────────
-    if [ "${MONTHLY_ENABLED}" = "true" ]; then
-        if [ "${NOW_TIME}" = "${MONTHLY_TIME}" ] && \
-           [ "${NOW_DAY}" = "${MONTHLY_DAY}" ] && \
-           [ "${LAST_MONTHLY}" != "${NOW_KEY}" ]; then
-            LAST_MONTHLY="${NOW_KEY}"
-            bashio::log.info "=== Starte MONATLICHES Backup ==="
-            /gfs_backup.sh "monthly" "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-                "${MONTHLY_DIR}" "${MONTHLY_KEEP_LOCAL}" "${MONTHLY_KEEP_REMOTE}" "${BACKUP_PASS}"
-        fi
+    if [ "${MONTHLY_ENABLED}" = "true" ] && \
+       [ "${NOW_TIME}" = "${MONTHLY_TIME}" ] && \
+       [ "${NOW_DAY}" = "${MONTHLY_DAY}" ] && \
+       [ "${LAST_MONTHLY}" != "${NOW_KEY}" ]; then
+        LAST_MONTHLY="${NOW_KEY}"
+        _run_backup "monthly" "${MONTHLY_DIR}" "${MONTHLY_KEEP_LOCAL}" "${MONTHLY_KEEP_REMOTE}"
     fi
 
-    # ── WÖCHENTLICH ───────────────────────────────────────────
-    if [ "${WEEKLY_ENABLED}" = "true" ]; then
-        if [ "${NOW_TIME}" = "${WEEKLY_TIME}" ] && \
-           [ "${NOW_DOW}" = "${WEEKLY_DOW}" ] && \
-           [ "${LAST_WEEKLY}" != "${NOW_KEY}" ]; then
-            LAST_WEEKLY="${NOW_KEY}"
-            bashio::log.info "=== Starte WÖCHENTLICHES Backup ==="
-            /gfs_backup.sh "weekly" "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-                "${WEEKLY_DIR}" "${WEEKLY_KEEP_LOCAL}" "${WEEKLY_KEEP_REMOTE}" "${BACKUP_PASS}"
-        fi
+    if [ "${WEEKLY_ENABLED}" = "true" ] && \
+       [ "${NOW_TIME}" = "${WEEKLY_TIME}" ] && \
+       [ "${NOW_DOW}" = "${WEEKLY_DOW}" ] && \
+       [ "${LAST_WEEKLY}" != "${NOW_KEY}" ]; then
+        LAST_WEEKLY="${NOW_KEY}"
+        _run_backup "weekly" "${WEEKLY_DIR}" "${WEEKLY_KEEP_LOCAL}" "${WEEKLY_KEEP_REMOTE}"
     fi
 
-    # ── TÄGLICH ───────────────────────────────────────────────
-    if [ "${DAILY_ENABLED}" = "true" ]; then
-        if [ "${NOW_TIME}" = "${DAILY_TIME}" ] && \
-           [ "${LAST_DAILY}" != "${NOW_KEY}" ]; then
-            LAST_DAILY="${NOW_KEY}"
-            bashio::log.info "=== Starte TÄGLICHES Backup ==="
-            /gfs_backup.sh "daily" "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-                "${DAILY_DIR}" "${DAILY_KEEP_LOCAL}" "${DAILY_KEEP_REMOTE}" "${BACKUP_PASS}"
-        fi
+    if [ "${DAILY_ENABLED}" = "true" ] && \
+       [ "${NOW_TIME}" = "${DAILY_TIME}" ] && \
+       [ "${LAST_DAILY}" != "${NOW_KEY}" ]; then
+        LAST_DAILY="${NOW_KEY}"
+        _run_backup "daily" "${DAILY_DIR}" "${DAILY_KEEP_LOCAL}" "${DAILY_KEEP_REMOTE}"
     fi
 
     sleep 60

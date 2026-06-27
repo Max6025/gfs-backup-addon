@@ -33,7 +33,6 @@ fi
 echo "[GFS] Erstelle Backup: ${BACKUP_NAME}"
 
 # ── 1. Backup über Supervisor API erstellen ────────────────────────────────
-# Korrekter Endpunkt: POST /backups/new/full
 if [ -n "${BACKUP_PASS}" ]; then
     PAYLOAD=$(printf '{"name": "%s", "password": "%s"}' "${BACKUP_NAME}" "${BACKUP_PASS}")
 else
@@ -64,30 +63,35 @@ if [ "${RESULT}" != "ok" ]; then
 fi
 
 BACKUP_SLUG=$(echo "${BODY}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['slug'])" 2>/dev/null)
-echo "[GFS] Backup erstellt: Slug=${BACKUP_SLUG}"
+echo "[GFS] Backup Slug: ${BACKUP_SLUG}"
 
-# Warten bis Datei auf Disk ist (max 10 Min)
-echo "[GFS] Warte auf Backup-Datei..."
+# ── 2. Warten bis Datei auf Disk ist ──────────────────────────────────────
+# Neues HA-Format (2025+): Name_Datum_Slug.tar  z.B. HA-Daily-2026-06-27_2026-06-27_15.30_fa3c7a9e.tar
+echo "[GFS] Suche Backup-Datei in /backup/ ..."
 WAIT=0
-while [ ! -f "/backup/${BACKUP_SLUG}/${BACKUP_SLUG}.tar" ] && [ ! -f "/backup/${BACKUP_SLUG}.tar" ] && [ "${WAIT}" -lt 600 ]; do
+BACKUP_FILE=""
+while [ "${WAIT}" -lt 600 ]; do
+    # Datei anhand Slug am Ende des Dateinamens finden
+    FOUND=$(find /backup -maxdepth 1 -name "*${BACKUP_SLUG}.tar" 2>/dev/null | head -1)
+    if [ -n "${FOUND}" ]; then
+        BACKUP_FILE="${FOUND}"
+        break
+    fi
     sleep 10
     WAIT=$((WAIT + 10))
 done
 
-# Neues Format (2025+): /backup/SLUG/SLUG.tar, Fallback auf altes Format
-BACKUP_FILE="/backup/${BACKUP_SLUG}/${BACKUP_SLUG}.tar"
-if [ ! -f "${BACKUP_FILE}" ]; then
-    BACKUP_FILE="/backup/${BACKUP_SLUG}.tar"
-fi
-if [ ! -f "${BACKUP_FILE}" ]; then
-    echo "[GFS] FEHLER: Backup-Datei nach ${WAIT}s nicht gefunden!"
+if [ -z "${BACKUP_FILE}" ]; then
+    echo "[GFS] FEHLER: Backup-Datei nicht gefunden nach ${WAIT}s"
+    echo "[GFS] Inhalt /backup/:"
+    ls /backup/
     exit 1
 fi
 
 FILESIZE=$(du -sh "${BACKUP_FILE}" | cut -f1)
-echo "[GFS] Backup-Datei: ${BACKUP_FILE} (${FILESIZE})"
+echo "[GFS] Datei gefunden: ${BACKUP_FILE} (${FILESIZE})"
 
-# ── 2. Auf NAS hochladen via smbclient ────────────────────────────────────
+# ── 3. Auf NAS hochladen via smbclient ────────────────────────────────────
 echo "[GFS] Upload → //${NAS_HOST}/${NAS_SHARE}/${TARGET_DIR}/${BACKUP_NAME}.tar"
 
 if [ -n "${NAS_USER}" ] && [ -n "${NAS_PASS}" ]; then
@@ -100,7 +104,7 @@ fi
 smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
     -c "mkdir ${TARGET_DIR}" 2>/dev/null || true
 
-# Upload
+# Upload mit lesbarem Namen
 smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
     -c "put ${BACKUP_FILE} ${TARGET_DIR}/${BACKUP_NAME}.tar"
 
@@ -108,10 +112,10 @@ if [ $? -ne 0 ]; then
     echo "[GFS] FEHLER: Upload fehlgeschlagen!"
     exit 1
 fi
-echo "[GFS] Upload OK"
+echo "[GFS] Upload OK: ${TARGET_DIR}/${BACKUP_NAME}.tar"
 
-# ── 3. Rotation auf NAS ───────────────────────────────────────────────────
-echo "[GFS] NAS-Rotation: max ${KEEP_REMOTE} behalten"
+# ── 4. Rotation auf NAS ───────────────────────────────────────────────────
+echo "[GFS] NAS-Rotation: max ${KEEP_REMOTE} behalten in ${TARGET_DIR}/"
 
 NAS_FILES=$(smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
     -c "ls ${TARGET_DIR}/HA-*.tar" 2>/dev/null | \
@@ -131,7 +135,7 @@ if [ "${NAS_COUNT}" -gt "${KEEP_REMOTE}" ]; then
     done
 fi
 
-# ── 4. Lokale Rotation ────────────────────────────────────────────────────
+# ── 5. Lokale Rotation ────────────────────────────────────────────────────
 echo "[GFS] Lokale Rotation: max ${KEEP_LOCAL} behalten"
 
 if [ "${KEEP_LOCAL}" -eq 0 ]; then
@@ -140,7 +144,6 @@ if [ "${KEEP_LOCAL}" -eq 0 ]; then
         -H "Authorization: Bearer ${TOKEN}" \
         "http://supervisor/backups/${BACKUP_SLUG}" > /dev/null
 else
-    # Alle lokalen Backups mit passendem Präfix holen
     ALL_BACKUPS=$(curl -s \
         -H "Authorization: Bearer ${TOKEN}" \
         "http://supervisor/backups" | \

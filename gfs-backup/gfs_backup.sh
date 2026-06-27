@@ -69,12 +69,16 @@ echo "[GFS] Backup erstellt: Slug=${BACKUP_SLUG}"
 # Warten bis Datei auf Disk ist (max 10 Min)
 echo "[GFS] Warte auf Backup-Datei..."
 WAIT=0
-while [ ! -f "/backup/${BACKUP_SLUG}.tar" ] && [ "${WAIT}" -lt 600 ]; do
+while [ ! -f "/backup/${BACKUP_SLUG}/${BACKUP_SLUG}.tar" ] && [ ! -f "/backup/${BACKUP_SLUG}.tar" ] && [ "${WAIT}" -lt 600 ]; do
     sleep 10
     WAIT=$((WAIT + 10))
 done
 
-BACKUP_FILE="/backup/${BACKUP_SLUG}.tar"
+# Neues Format (2025+): /backup/SLUG/SLUG.tar, Fallback auf altes Format
+BACKUP_FILE="/backup/${BACKUP_SLUG}/${BACKUP_SLUG}.tar"
+if [ ! -f "${BACKUP_FILE}" ]; then
+    BACKUP_FILE="/backup/${BACKUP_SLUG}.tar"
+fi
 if [ ! -f "${BACKUP_FILE}" ]; then
     echo "[GFS] FEHLER: Backup-Datei nach ${WAIT}s nicht gefunden!"
     exit 1

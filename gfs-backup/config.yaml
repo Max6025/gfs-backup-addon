@@ -1,8 +1,8 @@
 name: "GFS Backup"
-version: "2.0.0"
+version: "1.0.0"
 slug: "gfs_backup"
 description: "Großvater-Vater-Sohn Backup – täglich, wöchentlich, monatlich, jährlich mit automatischer Rotation auf Samba/NAS"
-url: "https://github.com/Max6025/gfs-backup-addon/"
+url: "https://github.com/MaxKoenig/gfs-backup-addon"
 arch:
   - aarch64
   - amd64
@@ -10,12 +10,15 @@ arch:
   - armv7
   - i386
 startup: "application"
-hassio_role: manager
 boot: "auto"
 init: false
 stdin: true
 hassio_api: true
 hassio_role: "backup"
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "GFS Backup HTTP API"
 map:
   - backup:rw
 

@@ -49,26 +49,59 @@ WEEKDAY_MAP[wed]=3; WEEKDAY_MAP[thu]=4; WEEKDAY_MAP[fri]=5; WEEKDAY_MAP[sat]=6
 WEEKLY_DOW="${WEEKDAY_MAP[${WEEKLY_WEEKDAY}]}"
 
 LAST_DAILY=""; LAST_WEEKLY=""; LAST_MONTHLY=""; LAST_YEARLY=""
-BACKUP_RUNNING="false"
-
 STATUS_FILE="/tmp/gfs_status.json"
+LAST_SUCCESS_TIME=""
+LAST_SUCCESS_NAME=""
+LAST_ERROR=""
 
-# ── Status in Datei schreiben (HTTP-Server liest sie) ─────────────────────
-_write_status() {
-    TOKEN="${SUPERVISOR_TOKEN}"
-    ALL=$(curl -s \
-        -H "Authorization: Bearer ${TOKEN}" \
-        "http://supervisor/backups" 2>/dev/null)
-
-    python3 << PYEOF
-import json, os, sys
+# ── Status schreiben ───────────────────────────────────────────────────────
+_set_phase() {
+    # $1 = phase, $2 = detail (optional)
+    PHASE="$1"
+    DETAIL="${2:-}"
+    python3 -c "
+import json, os
 from datetime import datetime
 
 try:
-    all_data = json.loads('''${ALL}''')
+    with open('${STATUS_FILE}', 'r') as f:
+        data = json.load(f)
+except:
+    data = {}
+
+data['phase'] = '${PHASE}'
+data['phase_detail'] = '${DETAIL}'
+data['phase_updated'] = datetime.now().isoformat()
+data['last_success_time'] = '${LAST_SUCCESS_TIME}'
+data['last_success_name'] = '${LAST_SUCCESS_NAME}'
+data['last_error'] = '${LAST_ERROR}'
+data['addon_running'] = True
+
+with open('${STATUS_FILE}', 'w') as f:
+    json.dump(data, f)
+" 2>/dev/null
+}
+
+# ── Vollständigen Status schreiben ─────────────────────────────────────────
+_write_full_status() {
+    TOKEN="${SUPERVISOR_TOKEN}"
+    ALL=$(curl -s -H "Authorization: Bearer ${TOKEN}" "http://supervisor/backups" 2>/dev/null)
+
+    python3 << PYEOF
+import json
+from datetime import datetime
+
+try:
+    all_data = json.loads(r"""${ALL}""")
     backups = all_data.get('data', {}).get('backups', [])
 except:
     backups = []
+
+try:
+    with open('${STATUS_FILE}', 'r') as f:
+        existing = json.load(f)
+except:
+    existing = {}
 
 prefixes = {
     'daily':   'HA-Daily-',
@@ -77,29 +110,11 @@ prefixes = {
     'yearly':  'HA-Yearly-',
 }
 
-result = {
-    'addon_running': True,
-    'backup_running': '${BACKUP_RUNNING}' == 'true',
-    'last_update': datetime.now().isoformat(),
-    'config': {
-        'nas_host': '${NAS_HOST}',
-        'nas_share': '${NAS_SHARE}',
-        'daily_time': '${DAILY_TIME}',
-        'weekly_time': '${WEEKLY_TIME}',
-        'weekly_weekday': '${WEEKLY_WEEKDAY}',
-        'monthly_time': '${MONTHLY_TIME}',
-        'monthly_day': int('${MONTHLY_DAY}'),
-        'yearly_time': '${YEARLY_TIME}',
-        'yearly_day': int('${YEARLY_DAY}'),
-        'yearly_month': int('${YEARLY_MONTH}'),
-    }
-}
-
 for btype, prefix in prefixes.items():
     typed = [b for b in backups if b.get('name','').startswith(prefix)]
     typed.sort(key=lambda x: x.get('date',''), reverse=True)
     last = typed[0] if typed else None
-    result[btype] = {
+    existing[btype] = {
         'count': len(typed),
         'last_date': last.get('date') if last else None,
         'last_name': last.get('name') if last else None,
@@ -107,24 +122,25 @@ for btype, prefix in prefixes.items():
         'last_slug': last.get('slug') if last else None,
     }
 
-with open('${STATUS_FILE}', 'w') as f:
-    json.dump(result, f)
-print('[GFS] Status aktualisiert')
-PYEOF
+existing['config'] = {
+    'nas_host': '${NAS_HOST}',
+    'nas_share': '${NAS_SHARE}',
+    'daily_time': '${DAILY_TIME}',
+    'weekly_time': '${WEEKLY_TIME}',
+    'weekly_weekday': '${WEEKLY_WEEKDAY}',
+    'monthly_time': '${MONTHLY_TIME}',
+    'monthly_day': int('${MONTHLY_DAY}'),
+    'yearly_time': '${YEARLY_TIME}',
+    'yearly_day': int('${YEARLY_DAY}'),
+    'yearly_month': int('${YEARLY_MONTH}'),
 }
+existing['addon_running'] = True
+existing['last_update'] = datetime.now().isoformat()
 
-# ── Backup starten ─────────────────────────────────────────────────────────
-_run_backup() {
-    local type="$1" dir="$2" keep_local="$3" keep_remote="$4"
-    BACKUP_RUNNING="true"
-    _write_status
-    bashio::log.info "=== Starte ${type} Backup ==="
-    /gfs_backup.sh "${type}" \
-        "${NAS_HOST}" "${NAS_SHARE}" "${NAS_USER}" "${NAS_PASS}" \
-        "${dir}" "${keep_local}" "${keep_remote}" "${BACKUP_PASS}" || \
-        bashio::log.error "${type} Backup fehlgeschlagen"
-    BACKUP_RUNNING="false"
-    _write_status
+with open('${STATUS_FILE}', 'w') as f:
+    json.dump(existing, f)
+print('[GFS] Vollständiger Status geschrieben')
+PYEOF
 }
 
 # ── NAS löschen ────────────────────────────────────────────────────────────
@@ -147,7 +163,173 @@ _delete_last_nas() {
     fi
 }
 
-# ── Befehl ausführen (von HTTP-Server via Flag-Datei) ─────────────────────
+# ── Backup mit Phasen-Status ───────────────────────────────────────────────
+_run_backup() {
+    local type="$1" dir="$2" keep_local="$3" keep_remote="$4"
+    local DATE=$(date +"%Y-%m-%d")
+    local YEAR=$(date +"%Y")
+    local MONTH=$(date +"%Y-%m")
+    local NAME=""
+
+    case "${type}" in
+        daily)   NAME="HA-Daily-${DATE}" ;;
+        weekly)  NAME="HA-Weekly-${DATE}" ;;
+        monthly) NAME="HA-Monthly-${MONTH}" ;;
+        yearly)  NAME="HA-Yearly-${YEAR}" ;;
+    esac
+
+    bashio::log.info "=== Starte ${type} Backup: ${NAME} ==="
+
+    # Phase 1: Erstellen
+    _set_phase "creating" "${NAME}"
+
+    PAYLOAD=$(printf '{"name": "%s"}' "${NAME}")
+    [ -n "${BACKUP_PASS}" ] && PAYLOAD=$(printf '{"name": "%s", "password": "%s"}' "${NAME}" "${BACKUP_PASS}")
+
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "${PAYLOAD}" \
+        "http://supervisor/backups/new/full")
+
+    HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+    BODY=$(echo "${RESPONSE}" | head -n -1)
+
+    if [ "${HTTP_CODE}" != "200" ] && [ "${HTTP_CODE}" != "201" ]; then
+        LAST_ERROR="Backup ${NAME} fehlgeschlagen: HTTP ${HTTP_CODE}"
+        bashio::log.error "${LAST_ERROR}"
+        _set_phase "error" "${LAST_ERROR}"
+        sleep 300
+        LAST_ERROR=""
+        _set_phase "idle" ""
+        _write_full_status
+        return 1
+    fi
+
+    BACKUP_SLUG=$(echo "${BODY}" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['slug'])" 2>/dev/null)
+    bashio::log.info "Backup erstellt: ${BACKUP_SLUG}"
+
+    # Warten auf Datei
+    WAIT=0
+    BACKUP_FILE=""
+    while [ "${WAIT}" -lt 600 ]; do
+        FOUND=$(find /backup -maxdepth 1 -name "*${BACKUP_SLUG}*" 2>/dev/null | head -1)
+        if [ -n "${FOUND}" ]; then
+            BACKUP_FILE="${FOUND}"
+            break
+        fi
+        sleep 10
+        WAIT=$((WAIT + 10))
+    done
+
+    if [ -z "${BACKUP_FILE}" ]; then
+        LAST_ERROR="Backup-Datei nicht gefunden: ${BACKUP_SLUG}"
+        bashio::log.error "${LAST_ERROR}"
+        _set_phase "error" "${LAST_ERROR}"
+        sleep 300
+        LAST_ERROR=""
+        _set_phase "idle" ""
+        return 1
+    fi
+
+    # Phase 2: Upload
+    _set_phase "uploading" "${NAME} → ${dir}/"
+    bashio::log.info "Upload: ${BACKUP_FILE} → ${dir}/${NAME}.tar"
+
+    if [ -n "${NAS_USER}" ] && [ -n "${NAS_PASS}" ]; then
+        SMB_AUTH="-U ${NAS_USER}%${NAS_PASS}"
+    else
+        SMB_AUTH="-N"
+    fi
+
+    smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
+        -c "mkdir ${dir}" 2>/dev/null || true
+
+    smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
+        -c "put ${BACKUP_FILE} ${dir}/${NAME}.tar"
+
+    if [ $? -ne 0 ]; then
+        LAST_ERROR="Upload fehlgeschlagen: ${NAME}"
+        bashio::log.error "${LAST_ERROR}"
+        _set_phase "error" "${LAST_ERROR}"
+        sleep 300
+        LAST_ERROR=""
+        _set_phase "idle" ""
+        return 1
+    fi
+    bashio::log.info "Upload OK"
+
+    # Phase 3: Rotation
+    _set_phase "rotating" "${dir}/"
+
+    # NAS Rotation
+    NAS_FILES=$(smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
+        -c "ls ${dir}/HA-*.tar" 2>/dev/null | \
+        grep "\.tar" | awk '{print $1}' | sort)
+    NAS_COUNT=$(echo "${NAS_FILES}" | grep -c "\.tar" 2>/dev/null || echo "0")
+    if [ "${NAS_COUNT}" -gt "${keep_remote}" ]; then
+        DELETE_COUNT=$((NAS_COUNT - keep_remote))
+        echo "${NAS_FILES}" | head -n "${DELETE_COUNT}" | while IFS= read -r filename; do
+            [ -z "${filename}" ] && continue
+            smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
+                -c "del ${dir}/${filename}" 2>/dev/null || true
+            bashio::log.info "NAS gelöscht: ${filename}"
+        done
+    fi
+
+    # Lokale Rotation
+    case "${type}" in
+        daily)   PREFIX="HA-Daily-" ;;
+        weekly)  PREFIX="HA-Weekly-" ;;
+        monthly) PREFIX="HA-Monthly-" ;;
+        yearly)  PREFIX="HA-Yearly-" ;;
+    esac
+
+    if [ "${keep_local}" -eq 0 ]; then
+        curl -s -X DELETE \
+            -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+            "http://supervisor/backups/${BACKUP_SLUG}" > /dev/null
+    else
+        ALL_BACKUPS=$(curl -s \
+            -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+            "http://supervisor/backups" | \
+            python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+pfx='${PREFIX}'
+bs=[b for b in data.get('data',{}).get('backups',[]) if b.get('name','').startswith(pfx)]
+bs.sort(key=lambda x:x.get('date',''))
+for b in bs: print(b['date']+'\t'+b['slug'])
+" 2>/dev/null)
+        LOCAL_COUNT=$(echo "${ALL_BACKUPS}" | grep -c $'\t' 2>/dev/null || echo "0")
+        if [ "${LOCAL_COUNT}" -gt "${keep_local}" ]; then
+            DELETE_LOCAL=$((LOCAL_COUNT - keep_local))
+            echo "${ALL_BACKUPS}" | head -n "${DELETE_LOCAL}" | awk -F'\t' '{print $2}' | \
+            while IFS= read -r slug; do
+                [ -z "${slug}" ] && continue
+                curl -s -X DELETE \
+                    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+                    "http://supervisor/backups/${slug}" > /dev/null
+                bashio::log.info "Lokal gelöscht: ${slug}"
+            done
+        fi
+    fi
+
+    # Phase 4: Erfolgreich (5 Minuten sichtbar)
+    LAST_SUCCESS_TIME=$(date +"%Y-%m-%dT%H:%M:%S")
+    LAST_SUCCESS_NAME="${NAME}"
+    LAST_ERROR=""
+    _set_phase "success" "${NAME}"
+    _write_full_status
+    bashio::log.info "✓ ${type} Backup fertig: ${NAME}"
+
+    sleep 300
+
+    # Zurück auf idle
+    _set_phase "idle" ""
+}
+
+# ── Befehl ausführen ───────────────────────────────────────────────────────
 _handle_command() {
     local CMD="$1"
     bashio::log.info "Befehl: ${CMD}"
@@ -173,7 +355,7 @@ if bs: print(bs[0]['slug'])
                     -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
                     "http://supervisor/backups/${LAST_SLUG}" > /dev/null
                 bashio::log.info "Lokal gelöscht: ${LAST_SLUG}"
-                _write_status
+                _write_full_status
             fi ;;
         delete_last_nas_daily)   _delete_last_nas "${DAILY_DIR}"   ;;
         delete_last_nas_weekly)  _delete_last_nas "${WEEKLY_DIR}"  ;;
@@ -187,8 +369,9 @@ if bs: print(bs[0]['slug'])
 python3 /server.py &
 bashio::log.info "HTTP-Server gestartet auf Port 8099"
 
-# Initialen Status schreiben
-_write_status
+# Initialen Status
+_set_phase "idle" ""
+_write_full_status
 
 bashio::log.info "GFS Backup läuft. Prüfe jede Minute..."
 
@@ -201,7 +384,7 @@ while true; do
     NOW_MONTH=$(date +%-m)
     NOW_KEY=$(date +"%Y-%m-%d-%H-%M")
 
-    # Flag-Dateien prüfen (Befehle vom HTTP-Server)
+    # Flag-Dateien prüfen
     for FLAG in /tmp/gfs_cmd_*; do
         [ -f "${FLAG}" ] || continue
         CMD=$(cat "${FLAG}" 2>/dev/null)
@@ -242,11 +425,11 @@ while true; do
         _run_backup "daily" "${DAILY_DIR}" "${DAILY_KEEP_LOCAL}" "${DAILY_KEEP_REMOTE}"
     fi
 
-    # Status alle 5 Minuten aktualisieren
+    # Status alle 5 Min aktualisieren
     STATUS_COUNTER=$((STATUS_COUNTER + 1))
     if [ "${STATUS_COUNTER}" -ge 5 ]; then
         STATUS_COUNTER=0
-        _write_status
+        _write_full_status
     fi
 
     sleep 60

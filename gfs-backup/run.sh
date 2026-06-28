@@ -9,6 +9,7 @@ NAS_SHARE=$(bashio::config 'nas_share')
 NAS_USER=$(bashio::config 'nas_username')
 NAS_PASS=$(bashio::config 'nas_password')
 BACKUP_PASS=$(bashio::config 'backup_password')
+TEST_MODE=$(bashio::config 'test_mode')
 
 DAILY_ENABLED=$(bashio::config 'daily_enabled')
 DAILY_TIME=$(bashio::config 'daily_time')
@@ -54,13 +55,16 @@ LAST_SUCCESS_TIME=""
 LAST_SUCCESS_NAME=""
 LAST_ERROR=""
 
-# ── Status schreiben ───────────────────────────────────────────────────────
+if [ "${TEST_MODE}" = "true" ]; then
+    bashio::log.warning "⚠️ TESTMODUS AKTIV – kein echtes Backup wird erstellt!"
+fi
+
+# ── Status schreiben + WebSocket Push ─────────────────────────────────────
 _set_phase() {
-    # $1 = phase, $2 = detail (optional)
-    PHASE="$1"
-    DETAIL="${2:-}"
+    local PHASE="$1"
+    local DETAIL="${2:-}"
     python3 -c "
-import json, os
+import json, sys
 from datetime import datetime
 
 try:
@@ -76,10 +80,22 @@ data['last_success_time'] = '${LAST_SUCCESS_TIME}'
 data['last_success_name'] = '${LAST_SUCCESS_NAME}'
 data['last_error'] = '${LAST_ERROR}'
 data['addon_running'] = True
+data['test_mode'] = '${TEST_MODE}' == 'true'
 
 with open('${STATUS_FILE}', 'w') as f:
     json.dump(data, f)
 " 2>/dev/null
+
+    # WebSocket Push – notify_clients via Python
+    python3 -c "
+import sys
+sys.path.insert(0, '/')
+try:
+    import server
+    server.notify_clients()
+except Exception as e:
+    pass
+" 2>/dev/null || true
 }
 
 # ── Vollständigen Status schreiben ─────────────────────────────────────────
@@ -135,17 +151,32 @@ existing['config'] = {
     'yearly_month': int('${YEARLY_MONTH}'),
 }
 existing['addon_running'] = True
+existing['test_mode'] = '${TEST_MODE}' == 'true'
 existing['last_update'] = datetime.now().isoformat()
 
 with open('${STATUS_FILE}', 'w') as f:
     json.dump(existing, f)
-print('[GFS] Vollständiger Status geschrieben')
+print('[GFS] Status aktualisiert')
 PYEOF
+
+    # WebSocket Push nach vollständigem Update
+    python3 -c "
+import sys, importlib.util
+spec = importlib.util.spec_from_file_location('server', '/server.py')
+try:
+    import server
+    server.notify_clients()
+except: pass
+" 2>/dev/null || true
 }
 
 # ── NAS löschen ────────────────────────────────────────────────────────────
 _delete_last_nas() {
     local DIR="$1"
+    if [ "${TEST_MODE}" = "true" ]; then
+        bashio::log.warning "[TESTMODUS] NAS-Löschung übersprungen: ${DIR}"
+        return 0
+    fi
     if [ -n "${NAS_USER}" ] && [ -n "${NAS_PASS}" ]; then
         SMB_AUTH="-U ${NAS_USER}%${NAS_PASS}"
     else
@@ -158,12 +189,10 @@ _delete_last_nas() {
         smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
             -c "del ${DIR}/${LAST_FILE}" 2>/dev/null
         bashio::log.info "NAS gelöscht: ${DIR}/${LAST_FILE}"
-    else
-        bashio::log.warning "Kein Backup in ${DIR}/ gefunden"
     fi
 }
 
-# ── Backup mit Phasen-Status ───────────────────────────────────────────────
+# ── Backup mit Phasen + Testmodus ─────────────────────────────────────────
 _run_backup() {
     local type="$1" dir="$2" keep_local="$3" keep_remote="$4"
     local DATE=$(date +"%Y-%m-%d")
@@ -172,13 +201,45 @@ _run_backup() {
     local NAME=""
 
     case "${type}" in
-        daily)   NAME="HA-Daily-${DATE}" ;;
-        weekly)  NAME="HA-Weekly-${DATE}" ;;
+        daily)   NAME="HA-Daily-${DATE}"    ;;
+        weekly)  NAME="HA-Weekly-${DATE}"   ;;
         monthly) NAME="HA-Monthly-${MONTH}" ;;
-        yearly)  NAME="HA-Yearly-${YEAR}" ;;
+        yearly)  NAME="HA-Yearly-${YEAR}"   ;;
     esac
 
     bashio::log.info "=== Starte ${type} Backup: ${NAME} ==="
+
+    if [ "${TEST_MODE}" = "true" ]; then
+        bashio::log.warning "[TESTMODUS] Simuliere Backup: ${NAME}"
+
+        # Phase 1: Erstellen simulieren (45s)
+        _set_phase "creating" "${NAME}"
+        bashio::log.info "[TESTMODUS] Simuliere Backup-Erstellung (45s)..."
+        sleep 45
+
+        # Phase 2: Upload simulieren (60s)
+        _set_phase "uploading" "${NAME} → ${dir}/"
+        bashio::log.info "[TESTMODUS] Simuliere Upload (60s)..."
+        sleep 60
+
+        # Phase 3: Rotation simulieren (5s)
+        _set_phase "rotating" "${dir}/"
+        bashio::log.info "[TESTMODUS] Simuliere Rotation (5s)..."
+        sleep 5
+
+        # Erfolg
+        LAST_SUCCESS_TIME=$(date +"%Y-%m-%dT%H:%M:%S")
+        LAST_SUCCESS_NAME="${NAME} [TEST]"
+        LAST_ERROR=""
+        _set_phase "success" "${NAME} [TEST]"
+        _write_full_status
+        bashio::log.info "[TESTMODUS] ✓ Simulation abgeschlossen: ${NAME}"
+        sleep 300
+        _set_phase "idle" ""
+        return 0
+    fi
+
+    # ── ECHTER Backup-Ablauf ───────────────────────────────────────────────
 
     # Phase 1: Erstellen
     _set_phase "creating" "${NAME}"
@@ -196,8 +257,8 @@ _run_backup() {
     BODY=$(echo "${RESPONSE}" | head -n -1)
 
     if [ "${HTTP_CODE}" != "200" ] && [ "${HTTP_CODE}" != "201" ]; then
-        LAST_ERROR="Backup ${NAME} fehlgeschlagen: HTTP ${HTTP_CODE}"
-        bashio::log.error "${LAST_ERROR}"
+        LAST_ERROR="HTTP ${HTTP_CODE}"
+        bashio::log.error "Backup fehlgeschlagen: ${LAST_ERROR}"
         _set_phase "error" "${LAST_ERROR}"
         sleep 300
         LAST_ERROR=""
@@ -223,8 +284,7 @@ _run_backup() {
     done
 
     if [ -z "${BACKUP_FILE}" ]; then
-        LAST_ERROR="Backup-Datei nicht gefunden: ${BACKUP_SLUG}"
-        bashio::log.error "${LAST_ERROR}"
+        LAST_ERROR="Backup-Datei nicht gefunden"
         _set_phase "error" "${LAST_ERROR}"
         sleep 300
         LAST_ERROR=""
@@ -244,25 +304,21 @@ _run_backup() {
 
     smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
         -c "mkdir ${dir}" 2>/dev/null || true
-
     smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
         -c "put ${BACKUP_FILE} ${dir}/${NAME}.tar"
 
     if [ $? -ne 0 ]; then
-        LAST_ERROR="Upload fehlgeschlagen: ${NAME}"
-        bashio::log.error "${LAST_ERROR}"
+        LAST_ERROR="Upload fehlgeschlagen"
         _set_phase "error" "${LAST_ERROR}"
         sleep 300
         LAST_ERROR=""
         _set_phase "idle" ""
         return 1
     fi
-    bashio::log.info "Upload OK"
 
     # Phase 3: Rotation
     _set_phase "rotating" "${dir}/"
 
-    # NAS Rotation
     NAS_FILES=$(smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
         -c "ls ${dir}/HA-*.tar" 2>/dev/null | \
         grep "\.tar" | awk '{print $1}' | sort)
@@ -273,16 +329,14 @@ _run_backup() {
             [ -z "${filename}" ] && continue
             smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
                 -c "del ${dir}/${filename}" 2>/dev/null || true
-            bashio::log.info "NAS gelöscht: ${filename}"
         done
     fi
 
-    # Lokale Rotation
     case "${type}" in
-        daily)   PREFIX="HA-Daily-" ;;
-        weekly)  PREFIX="HA-Weekly-" ;;
+        daily)   PREFIX="HA-Daily-"   ;;
+        weekly)  PREFIX="HA-Weekly-"  ;;
         monthly) PREFIX="HA-Monthly-" ;;
-        yearly)  PREFIX="HA-Yearly-" ;;
+        yearly)  PREFIX="HA-Yearly-"  ;;
     esac
 
     if [ "${keep_local}" -eq 0 ]; then
@@ -310,22 +364,18 @@ for b in bs: print(b['date']+'\t'+b['slug'])
                 curl -s -X DELETE \
                     -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
                     "http://supervisor/backups/${slug}" > /dev/null
-                bashio::log.info "Lokal gelöscht: ${slug}"
             done
         fi
     fi
 
-    # Phase 4: Erfolgreich (5 Minuten sichtbar)
+    # Erfolg
     LAST_SUCCESS_TIME=$(date +"%Y-%m-%dT%H:%M:%S")
     LAST_SUCCESS_NAME="${NAME}"
     LAST_ERROR=""
     _set_phase "success" "${NAME}"
     _write_full_status
     bashio::log.info "✓ ${type} Backup fertig: ${NAME}"
-
     sleep 300
-
-    # Zurück auf idle
     _set_phase "idle" ""
 }
 
@@ -365,15 +415,14 @@ if bs: print(bs[0]['slug'])
     esac
 }
 
-# ── HTTP-Server starten ────────────────────────────────────────────────────
+# ── HTTP + WebSocket Server starten ───────────────────────────────────────
 python3 /server.py &
-bashio::log.info "HTTP-Server gestartet auf Port 8099"
+bashio::log.info "Server gestartet (HTTP:8099, WebSocket:8098)"
 
-# Initialen Status
 _set_phase "idle" ""
 _write_full_status
 
-bashio::log.info "GFS Backup läuft. Prüfe jede Minute..."
+bashio::log.info "GFS Backup läuft. Testmodus: ${TEST_MODE}"
 
 STATUS_COUNTER=0
 
@@ -384,7 +433,6 @@ while true; do
     NOW_MONTH=$(date +%-m)
     NOW_KEY=$(date +"%Y-%m-%d-%H-%M")
 
-    # Flag-Dateien prüfen
     for FLAG in /tmp/gfs_cmd_*; do
         [ -f "${FLAG}" ] || continue
         CMD=$(cat "${FLAG}" 2>/dev/null)
@@ -392,7 +440,6 @@ while true; do
         [ -n "${CMD}" ] && _handle_command "${CMD}"
     done
 
-    # Zeitgesteuerte Backups
     if [ "${YEARLY_ENABLED}" = "true" ] && \
        [ "${NOW_TIME}" = "${YEARLY_TIME}" ] && \
        [ "${NOW_DAY}" = "${YEARLY_DAY}" ] && \
@@ -425,7 +472,6 @@ while true; do
         _run_backup "daily" "${DAILY_DIR}" "${DAILY_KEEP_LOCAL}" "${DAILY_KEEP_REMOTE}"
     fi
 
-    # Status alle 5 Min aktualisieren
     STATUS_COUNTER=$((STATUS_COUNTER + 1))
     if [ "${STATUS_COUNTER}" -ge 5 ]; then
         STATUS_COUNTER=0

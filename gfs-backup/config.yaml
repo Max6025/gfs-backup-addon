@@ -1,8 +1,8 @@
 name: "GFS Backup"
-version: "1.0.0"
+version: "1.1.0"
 slug: "gfs_backup"
-description: "Großvater-Vater-Sohn Backup – täglich, wöchentlich, monatlich, jährlich mit automatischer Rotation auf Samba/NAS"
-url: "https://github.com/MaxKoenig/gfs-backup-addon"
+description: "Großvater-Vater-Sohn Backup – täglich, wöchentlich, monatlich, jährlich mit NAS-Rotation und WebSocket Push"
+url: "https://github.com/Max6025/gfs-backup-addon"
 arch:
   - aarch64
   - amd64
@@ -17,8 +17,10 @@ hassio_api: true
 hassio_role: "backup"
 ports:
   8099/tcp: 8099
+  8098/tcp: 8098
 ports_description:
   8099/tcp: "GFS Backup HTTP API"
+  8098/tcp: "GFS Backup WebSocket Push"
 map:
   - backup:rw
 
@@ -27,15 +29,14 @@ options:
   nas_share: ""
   nas_username: ""
   nas_password: ""
+  test_mode: false
 
-  # Täglich
   daily_enabled: true
   daily_time: "03:00"
   daily_target_dir: "ha_daily"
   daily_keep_local: 1
   daily_keep_remote: 7
 
-  # Wöchentlich
   weekly_enabled: true
   weekly_time: "04:00"
   weekly_weekday: "sun"
@@ -43,7 +44,6 @@ options:
   weekly_keep_local: 1
   weekly_keep_remote: 4
 
-  # Monatlich
   monthly_enabled: true
   monthly_time: "05:00"
   monthly_day: 1
@@ -51,7 +51,6 @@ options:
   monthly_keep_local: 1
   monthly_keep_remote: 12
 
-  # Jährlich
   yearly_enabled: true
   yearly_time: "06:00"
   yearly_day: 1
@@ -67,6 +66,7 @@ schema:
   nas_share: "str"
   nas_username: "str?"
   nas_password: "str?"
+  test_mode: "bool"
 
   daily_enabled: "bool"
   daily_time: "str"

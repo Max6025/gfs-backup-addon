@@ -1,5 +1,5 @@
 name: "GFS Backup"
-version: "1.1.0"
+version: "1.2.0"
 slug: "gfs_backup"
 description: "Großvater-Vater-Sohn Backup – täglich, wöchentlich, monatlich, jährlich mit NAS-Rotation und WebSocket Push"
 url: "https://github.com/Max6025/gfs-backup-addon"

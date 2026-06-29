@@ -302,13 +302,26 @@ _run_backup() {
         SMB_AUTH="-N"
     fi
 
-    smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
-        -c "mkdir ${dir}" 2>/dev/null || true
+    # Fix: Ordner muss auf NAS bereits existieren – kein automatisches Anlegen
+    DIR_CHECK=$(smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
+        -c "ls ${dir}" 2>&1)
+    if echo "${DIR_CHECK}" | grep -qiE "NT_STATUS_NO_SUCH_FILE|NT_STATUS_OBJECT_NAME_NOT_FOUND|does not exist|No such"; then
+        LAST_ERROR="NAS-Ordner '${dir}' existiert nicht – bitte manuell auf dem NAS anlegen!"
+        bashio::log.error "${LAST_ERROR}"
+        _set_phase "error" "${LAST_ERROR}"
+        sleep 300
+        LAST_ERROR=""
+        _set_phase "idle" ""
+        return 1
+    fi
+    bashio::log.info "NAS-Ordner '${dir}' gefunden"
+
     smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
         -c "put ${BACKUP_FILE} ${dir}/${NAME}.tar"
 
     if [ $? -ne 0 ]; then
-        LAST_ERROR="Upload fehlgeschlagen"
+        LAST_ERROR="Upload fehlgeschlagen: ${dir}/${NAME}.tar"
+        bashio::log.error "${LAST_ERROR}"
         _set_phase "error" "${LAST_ERROR}"
         sleep 300
         LAST_ERROR=""
@@ -322,6 +335,7 @@ _run_backup() {
     NAS_FILES=$(smbclient "//${NAS_HOST}/${NAS_SHARE}" ${SMB_AUTH} \
         -c "ls ${dir}/HA-*.tar" 2>/dev/null | \
         grep "\.tar" | awk '{print $1}' | sort)
+    # sort ohne -r = älteste zuerst (Dateiname enthält Datum)
     NAS_COUNT=$(echo "${NAS_FILES}" | grep -c "\.tar" 2>/dev/null || echo "0")
     if [ "${NAS_COUNT}" -gt "${keep_remote}" ]; then
         DELETE_COUNT=$((NAS_COUNT - keep_remote))
